@@ -1,0 +1,207 @@
+target C {
+    platform: {
+      name: "rp2040",
+      board: "pololu_3pi_2040_robot"
+    },
+    single-threaded: true
+  }
+
+  import MotorsWithFeedback from "lib/MotorsWithFeedback.lf"
+  import Line from "lib/Line.lf"
+  import Display from "lib/Display.lf"
+  import Tilt from "lib/Tilt.lf"
+  import Encoders from "lib/Encoders.lf"
+  import Accelerometer from "lib/IMU.lf"
+  import GyroAngle from "lib/IMU.lf"
+  
+
+  preamble {=
+    #include <stdio.h>
+    #include <pico/stdlib.h>
+    #include <hardware/gpio.h>
+    #include <math.h>
+    =}
+
+main reactor{
+    line = new Line()
+    disp = new Display()
+    motor = new MotorsWithFeedback()
+    encoders = new Encoders()
+    tilt = new Tilt()
+    accelerometer = new Accelerometer()
+    gyro = new GyroAngle()
+
+    accelerometer.x->tilt.x
+    accelerometer.y->tilt.y
+    accelerometer.z->tilt.z
+
+    encoders.left->motor.left
+    encoders.right->motor.right
+
+    timer seconds(0, 1s) // Timer used to display seconds.
+    timer trig_timer(0, 50ms)
+
+    state fwd_speed_l: float = .205
+    state fwd_speed_r: float = .225
+    state bck_speed_l: float = .17
+    state bck_speed_r:float = .15
+    state turn_speed: float = .1
+    state adjust: float = .02
+    state max_roll: float = 10
+
+    state rotate_angle: float = 0;
+    state counts: int;
+
+    reaction(trig_timer) ->  gyro.trigger, encoders.trigger, accelerometer.trigger, line.trigger {=
+        lf_set(line.trigger, true);
+        lf_set(encoders.trigger, true);
+        lf_set(accelerometer.trigger, true);
+        lf_set(gyro.trigger,true);
+    =}
+
+    reaction(trig_timer) tilt.roll, tilt.pitch -> disp.line0, disp.line1{=
+        static char buf0[17];
+        static char buf1[17];
+        snprintf(buf0, 17, "roll: %3f", tilt.roll->value);
+        snprintf(buf1, 17, "pitch: %3f", tilt.pitch->value);
+        lf_set(disp.line0, buf0);
+        lf_set(disp.line1, buf1);
+    =}
+    
+    initial mode Wait {
+        reaction (seconds) -> reset(TurnUpHill), motor.left_speed, motor.right_speed {=
+            self->counts += 1;
+            if (self->counts >= 5) {
+                lf_set(motor.left_speed, self->turn_speed);
+                lf_set(motor.right_speed, -self->turn_speed);
+                self->counts = 0;
+                lf_set_mode(TurnUpHill);
+            }
+        =}
+    }
+
+    mode MoveUpHill {
+        reaction(trig_timer) -> disp.line2{=
+            lf_set(disp.line2, "MOVEUPHILL");
+        =}
+
+        reaction(tilt.roll) -> reset(TurnUpHill), motor.left_speed, motor.right_speed{=
+            if(abs(tilt.roll->value) > self->max_roll) {
+                lf_set(motor.left_speed, -self->turn_speed);
+                lf_set(motor.right_speed, self->turn_speed);
+                lf_set_mode(TurnUpHill);
+            }
+            else if (tilt.roll->value > 0){
+                lf_set(motor.right_speed, self->fwd_speed_r + self->adjust);
+                lf_set(motor.left_speed, self->fwd_speed_l - self->adjust);
+            }
+            else if (tilt.roll->value < 0){
+                lf_set(motor.left_speed, self->fwd_speed_l + self->adjust);
+                lf_set(motor.right_speed, self->fwd_speed_r - self->adjust);
+            }
+        =}
+        
+        //If flat, 180.
+        reaction(trig_timer) tilt.pitch -> motor.left_speed, motor.right_speed, reset(waitUpHill) {=
+
+            if(abs(tilt.pitch->value) < 1){
+                // self->rotate_angle = gyro.z->value;
+                lf_set(motor.left_speed, 0);
+                lf_set(motor.right_speed, 0);
+                // lf_set_mode(TurnFlat);
+                lf_set_mode(waitUpHill);
+            }
+            
+        =}
+
+    }
+
+    mode MoveDownHill{
+        reaction(trig_timer) -> disp.line2{=
+            lf_set(disp.line2, "MOVEDOWNHILL");
+        =}
+
+        reaction(tilt.roll) -> reset(TurnDownHill), motor.left_speed, motor.right_speed{=
+            if(abs(tilt.roll->value) > self->max_roll) {
+                lf_set(motor.left_speed, -self->turn_speed);
+                lf_set(motor.right_speed, self->turn_speed);
+                lf_set_mode(TurnDownHill);
+            }
+            else if (tilt.roll->value > 0){
+                lf_set(motor.right_speed, self->fwd_speed_r - self->adjust);
+                lf_set(motor.left_speed, self->fwd_speed_l + self->adjust);
+            }
+
+            else if (tilt.roll->value < 0){
+                lf_set(motor.left_speed, self->fwd_speed_l - self->adjust);
+                lf_set(motor.right_speed, self->fwd_speed_r + self->adjust);
+            }
+        =}
+    }
+
+    mode TurnUpHill {
+        reaction(trig_timer) -> disp.line2{=
+            lf_set(disp.line2, "TURNUPHILL");
+        =}
+        
+        reaction (tilt.roll) tilt.pitch -> reset(MoveUpHill), motor.left_speed, motor.right_speed {=
+            if (tilt.pitch->value > 0 && abs(tilt.roll->value) < 5) {
+                lf_set(motor.left_speed, self->fwd_speed_l);
+                lf_set(motor.right_speed, self->fwd_speed_r);
+                lf_set_mode(MoveUpHill);
+            }
+        =}   
+    }
+
+    mode TurnDownHill {
+        reaction(trig_timer) -> disp.line2 {=
+            lf_set(disp.line2, "TURNDOWNHILL");
+        =}
+        
+        reaction (tilt.roll) tilt.pitch -> reset(MoveDownHill), motor.left_speed, motor.right_speed {=
+            if (tilt.pitch->value < 0 && abs(tilt.roll->value) < 5) {
+                lf_set(motor.left_speed, self->fwd_speed_l);
+                lf_set(motor.right_speed, self->fwd_speed_r);
+                lf_set_mode(MoveDownHill);
+            }
+        =}
+    }
+
+    mode waitUpHill{
+        reaction(seconds) gyro.z, tilt.pitch -> reset(TurnFlat), reset(MoveUpHill), motor.right_speed, motor.left_speed{=
+            self->counts++;
+            if(self->counts >= 3){
+                if (abs(tilt.pitch->value) < 1){
+                    self->rotate_angle = gyro.z->value;
+                    lf_set(motor.left_speed, self->turn_speed);
+                    lf_set(motor.right_speed, -self->turn_speed);
+                    lf_set_mode(TurnFlat);
+                } else {
+                    lf_set(motor.left_speed, self->fwd_speed_l);
+                    lf_set(motor.right_speed, self->fwd_speed_r);
+                    lf_set_mode(MoveUpHill);
+                }
+            }
+        =}
+
+    }
+    
+
+    mode TurnFlat {
+        reaction(trig_timer) gyro.z -> disp.line2{=
+            static char buf2[17];
+            snprintf(buf2, 17, "angle: %3f",abs(gyro.z->value - self->rotate_angle));
+            lf_set(disp.line2, buf2);
+        =}
+
+        reaction(gyro.z) -> reset(MoveDownHill), motor.left_speed, motor.right_speed {=
+            if (abs(gyro.z->value - self->rotate_angle) > 175){
+                self->fwd_speed_l = self->bck_speed_l;
+                self->fwd_speed_r = self->bck_speed_r;
+                lf_set(motor.left_speed, self->fwd_speed_l);
+                lf_set(motor.right_speed, self->fwd_speed_r);
+                lf_set_mode(MoveDownHill);
+            }
+        =}
+    }
+}
